@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="/sokie-mobile/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Sokie — get local errands done, or earn running them.">
+  <meta name="theme-color" content="#14211B">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Sokie">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Sokie</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Cloudflare Turnstile (signup/sign-in bot protection, 2026-07-18).
+       Rendered explicitly from Dart via the helpers below -- see
+       lib/widgets/turnstile_widget.dart. -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
+  <script>
+    window.sokieRenderTurnstile = function (elementId, sitekey, cb) {
+      return turnstile.render('#' + elementId, {
+        sitekey: sitekey,
+        // 'interaction-only' keeps the widget invisible and runs the check in
+        // the background, only showing a checkbox if Cloudflare actually needs
+        // human interaction. Combined with managed mode this makes sign-in /
+        // sign-up / reset zero-friction for legitimate users while still
+        // issuing a token Supabase verifies server-side (founder direction
+        // 2026-10-02: reduce sign-in friction without dropping bot protection,
+        // which Supabase can't disable per-flow -- captcha is a global switch).
+        appearance: 'interaction-only',
+        callback: function (token) { cb(token); },
+        'expired-callback': function () { cb(''); },
+        'error-callback': function () { cb(''); },
+        'timeout-callback': function () { cb(''); }
+      });
+    };
+    window.sokieResetTurnstile = function (widgetId) {
+      try { turnstile.reset(widgetId); } catch (e) { }
+    };
+  </script>
+
+  <!-- Stripe.js for real card entry (2026-10-03). The publishable key is
+       fetched at runtime (stripe-config) and passed to sokieMountCard, so it's
+       never committed. Stripe.js must load from js.stripe.com. -->
+  <!-- Push notifications (OneSignal Web SDK v16, 2026-10-09). The worker lives
+       in its own sub-folder/scope so it never collides with Flutter's own
+       service worker; paths are derived from <base href> so the same build
+       works on GitHub Pages (/sokie-mobile/) and at a domain root (AWS). -->
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+  <script>
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window._sokiePushReady = false;
+    window.sokiePushInit = function (appId, userId) {
+      return new Promise(function (resolve) {
+        OneSignalDeferred.push(async function (OneSignal) {
+          try {
+            if (!window._sokiePushReady) {
+              var scope = new URL('push/onesignal/', document.baseURI).pathname;
+              await OneSignal.init({
+                appId: appId,
+                serviceWorkerParam: { scope: scope },
+                serviceWorkerPath: scope.replace(/^\//, '') + 'OneSignalSDKWorker.js',
+                allowLocalhostAsSecureOrigin: true,
+                autoResubscribe: true,
+                notifyButton: { enable: false }
+              });
+              window._sokiePushReady = true;
+            }
+            await OneSignal.login(userId);
+            resolve({ ok: true, permission: OneSignal.Notifications.permission, supported: OneSignal.Notifications.isPushSupported() });
+          } catch (e) {
+            resolve({ ok: false, error: (e && e.message) || String(e) });
+          }
+        });
+      });
+    };
+    // Must run from a tap: browsers block permission prompts otherwise.
+    window.sokiePushEnable = function () {
+      return new Promise(function (resolve) {
+        OneSignalDeferred.push(async function (OneSignal) {
+          try {
+            await OneSignal.Notifications.requestPermission();
+            await OneSignal.User.PushSubscription.optIn();
+            resolve({ ok: true, permission: OneSignal.Notifications.permission });
+          } catch (e) {
+            resolve({ ok: false, error: (e && e.message) || String(e) });
+          }
+        });
+      });
+    };
+    window.sokiePushLogout = function () {
+      OneSignalDeferred.push(async function (OneSignal) { try { await OneSignal.logout(); } catch (e) {} });
+    };
+  </script>
+  <!-- Paystack (Nigeria, 2026-10-08): in-page checkout for a transaction the
+       server already initialized; resolves {status, reference, message}. -->
+  <script src="https://js.paystack.co/v2/inline.js"></script>
+  <script>
+    window.sokiePaystackPay = function (accessCode) {
+      return new Promise(function (resolve) {
+        try {
+          var popup = new PaystackPop();
+          popup.resumeTransaction(accessCode, {
+            onSuccess: function (tx) { resolve({ status: 'success', reference: tx && tx.reference }); },
+            onCancel: function () { resolve({ status: 'cancel' }); },
+            onError: function (e) { resolve({ status: 'error', message: (e && e.message) || 'Payment failed.' }); }
+          });
+        } catch (e) {
+          resolve({ status: 'error', message: 'Paystack could not load. Check your connection and try again.' });
+        }
+      });
+    };
+  </script>
+  <script src="https://js.stripe.com/v3/"></script>
+  <script>
+    window._sokieStripe = null;
+    window._sokieCard = null;
+    window.sokieMountCard = function (elementId, publishableKey) {
+      try {
+        if (!window._sokieStripe) window._sokieStripe = Stripe(publishableKey);
+        var elements = window._sokieStripe.elements();
+        var card = elements.create('card', {
+          hidePostalCode: false,
+          style: { base: { fontSize: '16px', color: '#14211B', '::placeholder': { color: '#8A978D' } } }
+        });
+        card.mount('#' + elementId);
+        window._sokieCard = card;
+        return true;
+      } catch (e) { return false; }
+    };
+    // Returns a Promise resolving to { id } or { error }.
+    window.sokieCreatePaymentMethod = function () {
+      if (!window._sokieStripe || !window._sokieCard) return Promise.resolve({ error: 'Card form not ready.' });
+      return window._sokieStripe.createPaymentMethod({ type: 'card', card: window._sokieCard })
+        .then(function (res) { return res.error ? { error: res.error.message } : { id: res.paymentMethod.id }; })
+        .catch(function () { return { error: 'Could not read the card.' }; });
+    };
+  </script>
+
+  <!-- Auto-apply new deploys (founder report 2026-10-02: a stale cached build
+       kept sending sign-in requests without a captcha token). Flutter's
+       service worker installs a new build into a "waiting" state and keeps
+       serving the OLD cached bundle until every tab closes -- so users get
+       stuck on old code even after a hard refresh. Flutter's generated worker
+       honors a 'skipWaiting' message, so we nudge any waiting worker to
+       activate immediately, then reload once it takes control. Only reloads
+       when REPLACING an existing controller, so a brand-new first visit
+       (which is already fresh) doesn't double-load. -->
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      var hadController = !!navigator.serviceWorker.controller;
+      var refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (refreshing || !hadController) return;
+        refreshing = true;
+        window.location.reload();
+      });
+      function nudge(sw) { if (sw) { try { sw.postMessage('skipWaiting'); } catch (e) {} } }
+      navigator.serviceWorker.ready.then(function (reg) {
+        if (reg.waiting) nudge(reg.waiting);
+        reg.addEventListener('updatefound', function () {
+          var nw = reg.installing;
+          if (!nw) return;
+          nw.addEventListener('statechange', function () {
+            if (nw.state === 'installed') nudge(reg.waiting || nw);
+          });
+        });
+        try { reg.update(); } catch (e) {}
+      }).catch(function () {});
+    })();
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
