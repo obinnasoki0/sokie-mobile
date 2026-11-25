@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mysokie.com/sitemap.xml
